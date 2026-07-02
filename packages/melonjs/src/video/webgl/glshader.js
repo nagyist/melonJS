@@ -295,6 +295,48 @@ export default class GLShader {
 	}
 
 	/**
+	 * Create an independent copy of this shader, compiled as its own GL
+	 * program from the same vertex + fragment sources (and precision), with
+	 * every uniform value set so far replayed onto the copy. Use it when
+	 * several renderables need the same custom shader with *different*
+	 * uniform values — a single instance has a single set of uniforms.
+	 *
+	 * Ownership and lifecycle state do NOT carry over: the clone's
+	 * {@link shared} flag is **always reset to `false`**, even when cloning
+	 * a shared shader — the clone is caller-owned and will be auto-destroyed
+	 * by the renderable it is assigned to, unless you explicitly set
+	 * `shared = true` on it yourself. Note that `ShaderEffect` (which wraps
+	 * a GLShader by composition) has its own `clone()` with the same
+	 * semantics, which additionally copies its effect-level state (extra
+	 * `setTexture` bindings).
+	 * @returns {GLShader} a new, caller-owned shader (`shared === false`)
+	 */
+	clone() {
+		if (this.destroyed) {
+			throw new Error("GLShader.clone: shader has been destroyed");
+		}
+		const copy = new GLShader(
+			this.gl,
+			this._sourceVertex,
+			this._sourceFragment,
+			this._precision,
+		);
+		// replay this shader's cached uniform values onto the clone (the same
+		// snapshot store the context-loss recovery replays from). When the
+		// clone is constructed mid-context-loss its program compiles deferred
+		// (`uniforms` is null) — the suspended setUniform caches values for
+		// the restore replay. When live, validate against the clone's active
+		// uniforms (same guard the restore replay uses) so a name cached
+		// during an earlier suspended window can't make setUniform throw.
+		for (const name of Object.keys(this._uniformCache)) {
+			if (copy.suspended || typeof copy.uniforms[name] !== "undefined") {
+				copy.setUniform(name, this._uniformCache[name]);
+			}
+		}
+		return copy;
+	}
+
+	/**
 	 * destroy this shader objects resources (program, attributes, uniforms).
 	 * Idempotent — calling destroy twice (or after a context-lost suspend)
 	 * is safe. Unsubscribes from the renderer's context lost / restored
