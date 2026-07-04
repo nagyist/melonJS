@@ -265,19 +265,20 @@ export class MaterialBatcher extends Batcher {
 	deleteTexture2D(texture) {
 		if (typeof texture.getTexture === "function") {
 			// Iterate every atlas registered under this image — post-#1448,
-			// the multimap can hold multiple atlases per image (one per
-			// repeat mode), each bound to its own GL texture in
-			// `boundTextures`. Without this loop the OTHER repeats' GL
-			// textures would be orphaned: `cache.delete(image)` frees
-			// every (source, repeat) unit, but only THIS texture's
-			// `boundTextures[unit]` would be deleted+unbound, leaving
-			// stale binds on the freed units until something overwrites.
+			// the multimap can hold multiple atlases per image — and, per
+			// atlas, EVERY (source, repeat) unit: a single atlas can own
+			// several per-repeat units via the per-use wrap override
+			// (meshes' `textureRepeat`, #1503), which a per-repeat
+			// `peekUnit` lookup (keyed on the atlas's current `repeat`
+			// field) would miss. `cache.delete(image)` below frees all of
+			// those units; any GL texture left behind in
+			// `boundTextures[unit]` would make a later allocation of the
+			// same unit look "already uploaded" and bind a stale texture.
 			const image = texture.getTexture();
 			const cache = this.renderer.cache;
 			if (cache.has(image)) {
 				for (const atlas of cache.cache.get(image)) {
-					const unit = cache.peekUnit(atlas);
-					if (unit !== -1) {
+					for (const unit of cache.peekAllUnits(atlas)) {
 						const texture2D = this.boundTextures[unit];
 						if (typeof texture2D !== "undefined") {
 							this.gl.deleteTexture(texture2D);
@@ -357,9 +358,15 @@ export class MaterialBatcher extends Batcher {
 	 * @param {number} [h] - same as `w`.
 	 * @param {boolean} [force=false]
 	 * @param {boolean} [flush=true]
+	 * @param {string} [repeat] - per-use wrap-mode override (a mesh's
+	 *   `textureRepeat`, #1503) — sampled with this wrap without mutating
+	 *   the shared atlas's `repeat`. The texture-unit cache keys by
+	 *   `(source, repeat)`, so each wrap gets its own unit + GL texture.
+	 *   Omit to use `texture.repeat`.
 	 */
-	uploadTexture(texture, w, h, force = false, flush = true) {
-		const unit = this.renderer.cache.getUnit(texture);
+	uploadTexture(texture, w, h, force = false, flush = true, repeat) {
+		const wrap = typeof repeat === "string" ? repeat : texture.repeat;
+		const unit = this.renderer.cache.getUnit(texture, wrap);
 		const texture2D = this.boundTextures[unit];
 
 		if (typeof texture2D === "undefined" || force) {
@@ -392,7 +399,7 @@ export class MaterialBatcher extends Batcher {
 				unit,
 				source,
 				filter,
-				texture.repeat,
+				wrap,
 				texW,
 				texH,
 				texture.premultipliedAlpha,
