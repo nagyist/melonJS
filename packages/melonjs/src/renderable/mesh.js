@@ -130,7 +130,10 @@ function resolveGroupMaterial(group, materials) {
  * mesh under a transformed parent to pivot elsewhere). Consequently, on the
  * `Camera3d` world-space path the mesh opts out of the anchor offset entirely
  * (see {@link Renderable#applyAnchorTransform}); the legacy 2D path still
- * honors `anchorPoint` for backward compatibility.
+ * honors `anchorPoint` for backward compatibility. Subclasses that bake the
+ * anchor into their vertex data instead (e.g. {@link Sprite3d}, via the
+ * internal `_anchorBaked` flag) opt out on **both** paths — for those, the
+ * vertex bake is the single anchoring mechanism.
  * @category Game Objects
  */
 export default class Mesh extends Renderable {
@@ -574,6 +577,15 @@ export default class Mesh extends Renderable {
 
 		this.anchorPoint.set(0.5, 0.5);
 
+		// Subclasses that bake the anchor offset directly into their vertex
+		// data (e.g. Sprite3d) set this true, so preDraw suppresses the base
+		// anchor translate on BOTH camera paths — the vertex bake is then the
+		// single anchoring mechanism (the Camera2d fallback loses its exact
+		// pixel-shift anchor for such subclasses; that path is documented as
+		// degraded for them anyway). Plain meshes keep the legacy 2D anchor.
+		/** @ignore */
+		this._anchorBaked = false;
+
 		// skip applying the 3D transform to the 2D renderer context in preDraw
 		// the full 3D transform is applied to vertices in draw() instead
 		this.autoTransform = false;
@@ -803,13 +815,19 @@ export default class Mesh extends Renderable {
 	 * path the mesh emits final world coordinates, so it opts out of the base
 	 * anchor-point offset ({@link Renderable#applyAnchorTransform} = `false`) —
 	 * otherwise the offset would leak into the shared mesh view matrix. The 2D
-	 * path keeps the anchor. See the class description for the pivot rationale.
+	 * path keeps the anchor — except for subclasses with a vertex-baked anchor
+	 * (`_anchorBaked`, e.g. {@link Sprite3d}), which suppress it on both paths.
+	 * See the class description for the pivot rationale.
 	 * @param {CanvasRenderer|WebGLRenderer} renderer - a renderer instance
 	 */
 	preDraw(renderer) {
 		// world-space meshes pivot about their own origin, not a bounds-box
-		// anchor (see Mesh class doc + Renderable#applyAnchorTransform)
-		this.applyAnchorTransform = this._useWorldSpace !== true;
+		// anchor (see Mesh class doc + Renderable#applyAnchorTransform); a
+		// subclass with a vertex-baked anchor (`_anchorBaked`) opts out on
+		// both paths — recomputed here every frame, so a one-shot constructor
+		// assignment could never stick
+		this.applyAnchorTransform =
+			this._useWorldSpace !== true && this._anchorBaked !== true;
 		super.preDraw(renderer);
 	}
 

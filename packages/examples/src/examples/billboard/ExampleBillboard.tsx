@@ -183,7 +183,9 @@ const createGame = () => {
 	// frames are rotated + trimmed (also exercising that mapping). `preload`'s
 	// third arg is `false` so it does NOT switch to the built-in loading state
 	// (this example builds its scene manually rather than through a Stage).
-	const GY = -112; // character center (feet near the floor, render space Y-down)
+	const GY = 0; // the characters' FEET baseline (anchored on the floor plane, render space Y-down)
+	const HERO_H = 225;
+	const TAG_GAP = 20; // gap between head-top and tag bottom
 	const modes: Array<
 		[number, boolean | "cylindrical" | "spherical", string, string]
 	> = [
@@ -202,26 +204,29 @@ const createGame = () => {
 				loader.getImage("cityscene"),
 			);
 			for (const [x, mode, label, accent] of modes) {
-				// the character — same art + animation, one per billboard mode
 				const guy = new Sprite3d(x, GY, {
 					...atlas.getAnimationSettings(WALK_FRAMES),
 					width: 130,
-					height: 225,
+					height: HERO_H,
 					z: 0,
 					billboard: mode,
+					anchorPoint: "bottom", // feet at pos — character only
 				});
 				guy.addAnimation("walk", WALK_FRAMES, 90);
 				guy.setCurrentAnimation("walk");
 				app.world.addChild(guy);
 
-				// a name tag above the head — spherical so it always reads, whatever
-				// the camera is doing
-				const tag = new Sprite3d(x, GY - 150, {
+				// tag stays centered (default origin) — floats above the head,
+				// positioned relative to the character's new head-top position
+				const tagHeight = 42;
+				const tagY = GY - HERO_H - TAG_GAP - tagHeight / 2;
+				const tag = new Sprite3d(x, tagY, {
 					image: bakeLabel(label, accent),
 					width: 150,
-					height: 42,
+					height: tagHeight,
 					z: 0,
 					billboard: "spherical",
+					// no anchorPoint — the default center is correct here
 				});
 				app.world.addChild(tag);
 			}
@@ -233,7 +238,9 @@ const createGame = () => {
 	const camera = app.viewport as InstanceType<typeof Camera3dClass>;
 	camera.fov = (55 * Math.PI) / 180;
 	camera.setClipPlanes(8, 6000);
-	const TARGET = { x: 0, y: GY * 0.6, z: 0 };
+	// frame mid-body — ≈ the pre-anchoring framing (was GY * 0.6 with
+	// GY = -112 → -67.2, before GY became the feet baseline at 0)
+	const TARGET = { x: 0, y: -HERO_H * 0.3, z: 0 };
 
 	let t = 0;
 	let paused = false;

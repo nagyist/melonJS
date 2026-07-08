@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import {
 	boot,
 	Camera3d,
+	Mesh,
 	Sprite3d,
 	Vector2d,
 	Vector3d,
@@ -639,5 +640,515 @@ describe("Sprite3d resource cleanup", () => {
 		s.destroy();
 		// the pooled Vector2d is returned and the reference cleared
 		expect(s._frameAnim.current.offset).toBeNull();
+	});
+});
+
+describe("Sprite3d anchorPoint (vertex-baked anchor)", () => {
+	beforeAll(() => {
+		boot();
+		video.init(64, 64, { parent: "screen", renderer: video.CANVAS });
+	});
+
+	const makeTex = (w = 4, h = 4) => {
+		const c = document.createElement("canvas");
+		c.width = w;
+		c.height = h;
+		c.getContext("2d").fillRect(0, 0, w, h);
+		return c;
+	};
+
+	// 20×30 quad at (100, 50): hw = 10, hh = 15
+	const mk = (anchor, extra = {}) => {
+		const settings = {
+			image: makeTex(),
+			width: 20,
+			height: 30,
+			z: -200,
+			...extra,
+		};
+		if (anchor !== undefined) {
+			settings.anchorPoint = anchor;
+		}
+		return new Sprite3d(100, 50, settings);
+	};
+
+	const localXs = (v) => {
+		return [v[0], v[3], v[6], v[9]];
+	};
+	const localYs = (v) => {
+		return [v[1], v[4], v[7], v[10]];
+	};
+
+	it('"bottom" bakes the local quad shifted so the bottom edge is at the origin', () => {
+		const v = mk("bottom").originalVertices;
+		// offsetY = (1 - 0.5) * 30 = +15 → local y ∈ {0, 30} (local +Y = art top)
+		expect(new Set(localYs(v))).toEqual(new Set([0, 30]));
+		expect(new Set(localXs(v))).toEqual(new Set([-10, 10]));
+	});
+
+	it('"top-left" bakes both offsets', () => {
+		const v = mk("top-left").originalVertices;
+		// offsetX = (0.5 - 0) * 20 = +10; offsetY = (0 - 0.5) * 30 = -15
+		expect(new Set(localXs(v))).toEqual(new Set([0, 20]));
+		expect(new Set(localYs(v))).toEqual(new Set([-30, 0]));
+	});
+
+	it('"bottom": feet land exactly at pos on the fixed-orientation path', () => {
+		const s = mk("bottom");
+		s._projectVerticesWorld(s.pos.x, s.pos.y, s.depth);
+		const ys = [s.vertices[1], s.vertices[4], s.vertices[7], s.vertices[10]];
+		// world Y is negated local Y: feet (local 0) at pos.y, head at pos.y - h
+		expect(Math.max(...ys)).toBeCloseTo(50, 5);
+		expect(Math.min(...ys)).toBeCloseTo(20, 5);
+		const xs = [s.vertices[0], s.vertices[3], s.vertices[6], s.vertices[9]];
+		expect(Math.min(...xs)).toBeCloseTo(90, 5);
+		expect(Math.max(...xs)).toBeCloseTo(110, 5);
+	});
+
+	it('"bottom" + cylindrical billboard: feet stay planted and upright at any yaw/pitch', () => {
+		const cam = new Camera3d(0, 0, 64, 64);
+		const s = mk("bottom", { billboard: "cylindrical" });
+		for (const [yaw, pitch] of [
+			[0, 0],
+			[0.8, -0.3],
+			[-1.2, 0.6],
+		]) {
+			cam.yaw = yaw;
+			cam.pitch = pitch;
+			s._billboardCam = cam;
+			s._projectVerticesWorld(s.pos.x, s.pos.y, s.depth);
+			const v = s.vertices;
+			const ys = [v[1], v[4], v[7], v[10]];
+			// two corners at the feet (pos.y), two at the head (pos.y - h)
+			expect(
+				ys.filter((y) => {
+					return Math.abs(y - 50) < 1e-4;
+				}).length,
+			).toBe(2);
+			expect(
+				ys.filter((y) => {
+					return Math.abs(y - 20) < 1e-4;
+				}).length,
+			).toBe(2);
+			// the vertical edge (c0 → c3) is purely world-up: no x/z drift
+			expect(Math.abs(v[9] - v[0])).toBeLessThan(1e-4);
+			expect(Math.abs(v[11] - v[2])).toBeLessThan(1e-4);
+		}
+	});
+
+	it('"bottom-left" + flipX: anchor stays pinned, extents unchanged, toggle restores', () => {
+		const s = mk("bottom-left");
+		const before = Array.from(s.originalVertices);
+		expect(new Set(localXs(s.originalVertices))).toEqual(new Set([0, 20]));
+		expect(new Set(localYs(s.originalVertices))).toEqual(new Set([0, 30]));
+
+		s.flipX();
+		// mirrored about the art's own center, then re-pinned: same extents
+		expect(new Set(localXs(s.originalVertices))).toEqual(new Set([0, 20]));
+		expect(new Set(localYs(s.originalVertices))).toEqual(new Set([0, 30]));
+
+		s.flipX(false);
+		expect(Array.from(s.originalVertices)).toEqual(before);
+	});
+
+	it('trimmed atlas region + "bottom": trim mapping plus the anchor offset', () => {
+		const img = makeTex(200, 200);
+		const s = new Sprite3d(0, 0, {
+			image: img,
+			width: 200,
+			height: 200,
+			anchorPoint: "bottom",
+		});
+		// same trimmed region as the un-anchored mapping test above
+		s.setRegion({
+			offset: { x: 10, y: 20 },
+			width: 120,
+			height: 140,
+			trimmed: true,
+			trim: { x: 40, y: 30, w: 120, h: 140 },
+			sourceSize: { w: 200, h: 200 },
+			angle: 0,
+		});
+		const v = s.originalVertices;
+		// offsetY = +100 on top of the (-60,-70)…(60,70) trim mapping
+		expect([v[0], v[1]]).toEqual([-60, 30]);
+		expect([v[6], v[7]]).toEqual([60, 170]);
+		// UVs are untouched by the anchor
+		expect(v && s.uvs[0]).toBeCloseTo(0.05, 5);
+		expect(s.uvs[5]).toBeCloseTo(0.1, 5);
+	});
+
+	it("runtime anchorPoint.set() re-bakes the quad and grows the cull bounds (region path)", () => {
+		const s = mk(undefined); // centered default
+		expect(new Set(localYs(s.originalVertices))).toEqual(new Set([-15, 15]));
+		expect(s.width).toBe(30); // max(w, h), legacy centered bounds
+
+		s.isDirty = false;
+		s.anchorPoint.set(0.5, 1);
+
+		expect(s._anchorOffsetX).toBe(0);
+		expect(s._anchorOffsetY).toBe(15);
+		expect(new Set(localYs(s.originalVertices))).toEqual(new Set([0, 30]));
+		expect(s.isDirty).toBe(true);
+		// circumradius about pos: √2 · hypot(hw + |ox|, hh + |oy|)
+		expect(s.width).toBeCloseTo(Math.SQRT2 * Math.hypot(10, 30), 5);
+		expect(s.height).toBeCloseTo(Math.SQRT2 * Math.hypot(10, 30), 5);
+	});
+
+	it("runtime anchorPoint.set() re-bakes the plain quad on the no-region path", () => {
+		const s = mk("bottom");
+		// force the named-atlas path where no frame region ever landed
+		s._region = null;
+		s.anchorPoint.set(0.5, 0.5);
+		expect(new Set(localYs(s.originalVertices))).toEqual(new Set([-15, 15]));
+		expect(new Set(localXs(s.originalVertices))).toEqual(new Set([-10, 10]));
+	});
+
+	it("cull bounds: grown exactly for the bottom anchor, unchanged for the centered default", () => {
+		const centered = new Sprite3d(0, 0, {
+			image: makeTex(),
+			width: 130,
+			height: 225,
+		});
+		expect(centered.width).toBe(225);
+
+		const anchored = new Sprite3d(0, 0, {
+			image: makeTex(),
+			width: 130,
+			height: 225,
+			anchorPoint: "bottom",
+		});
+		// √2 · hypot(65, 112.5 + 112.5) ≈ 331.22 — the sphere derived from
+		// this (radius = side/√2) exactly encloses the billboard sweep
+		expect(anchored.width).toBeCloseTo(Math.SQRT2 * Math.hypot(65, 225), 4);
+		expect(anchored.width).toBeGreaterThan(225);
+	});
+
+	it("the anchor is never applied as a renderer transform, on either camera path", () => {
+		const noop = () => {};
+		const fakeRenderer = {
+			save: noop,
+			restore: noop,
+			resetTransform: noop,
+			translate: noop,
+			transform: noop,
+			setColor: noop,
+			setBlendMode: noop,
+			getBlendMode: () => {
+				return "normal";
+			},
+			setTint: noop,
+			clearTint: noop,
+			setDepth: noop,
+			setGlobalAlpha: noop,
+			globalAlpha: () => {
+				return 1;
+			},
+			getGlobalAlpha: () => {
+				return 1;
+			},
+			setCustomShader: noop,
+			clearCustomShader: noop,
+			beginPostEffect: noop,
+			endPostEffect: noop,
+			currentTransform: {
+				isIdentity: () => {
+					return true;
+				},
+			},
+		};
+
+		for (const sprite of [mk("bottom"), mk(undefined)]) {
+			sprite._useWorldSpace = true;
+			sprite.preDraw(fakeRenderer);
+			expect(sprite.applyAnchorTransform).toBe(false);
+			sprite._useWorldSpace = false;
+			sprite.preDraw(fakeRenderer);
+			expect(sprite.applyAnchorTransform).toBe(false);
+		}
+
+		// a plain Mesh keeps the legacy 2D anchor behavior
+		const mesh = new Mesh(0, 0, {
+			vertices: [0, 0, 0, 10, 0, 0, 10, 10, 0],
+			uvs: [0, 0, 1, 0, 1, 1],
+			indices: [0, 1, 2],
+			width: 10,
+			normalize: false,
+		});
+		mesh._useWorldSpace = false;
+		mesh.preDraw(fakeRenderer);
+		expect(mesh.applyAnchorTransform).toBe(true);
+	});
+});
+
+describe("Sprite3d anchorPoint — adversarial", () => {
+	beforeAll(() => {
+		boot();
+		video.init(64, 64, { parent: "screen", renderer: video.CANVAS });
+	});
+
+	const makeTex = (w = 4, h = 4) => {
+		const c = document.createElement("canvas");
+		c.width = w;
+		c.height = h;
+		c.getContext("2d").fillRect(0, 0, w, h);
+		return c;
+	};
+
+	const mk = (anchor, extra = {}) => {
+		const settings = {
+			image: makeTex(),
+			width: 20,
+			height: 30,
+			z: -200,
+			...extra,
+		};
+		if (anchor !== undefined) {
+			settings.anchorPoint = anchor;
+		}
+		return new Sprite3d(100, 50, settings);
+	};
+
+	// 64×32 sheet → two 32×32 frames, sprite 1:1
+	const makeAnimated = (anchor) => {
+		const sheet = document.createElement("canvas");
+		sheet.width = 64;
+		sheet.height = 32;
+		sheet.getContext("2d").fillRect(0, 0, 64, 32);
+		const settings = {
+			image: sheet,
+			framewidth: 32,
+			frameheight: 32,
+			width: 32,
+			height: 32,
+		};
+		if (anchor !== undefined) {
+			settings.anchorPoint = anchor;
+		}
+		const s = new Sprite3d(0, 0, settings);
+		s.addAnimation("walk", [0, 1], 100);
+		s.setCurrentAnimation("walk");
+		return s;
+	};
+
+	const xs = (v) => {
+		return [v[0], v[3], v[6], v[9]];
+	};
+	const ys = (v) => {
+		return [v[1], v[4], v[7], v[10]];
+	};
+
+	it("the anchor survives animation frame changes", () => {
+		const s = makeAnimated("bottom"); // 32×32 → offsetY = +16
+		const before = Array.from(s.originalVertices);
+		s.setAnimationFrame(1);
+		// same geometry (untrimmed equal-size frames), only UVs move
+		expect(Array.from(s.originalVertices)).toEqual(before);
+		expect(new Set(ys(s.originalVertices))).toEqual(new Set([0, 32]));
+	});
+
+	it("combined torture: anchor + flipX + frame change + runtime re-anchor", () => {
+		const s = makeAnimated("bottom");
+		s.flipX();
+		s.setAnimationFrame(1);
+		// bottom anchor, flipped: x mirrored about art center, feet pinned
+		expect(new Set(xs(s.originalVertices))).toEqual(new Set([-16, 16]));
+		expect(new Set(ys(s.originalVertices))).toEqual(new Set([0, 32]));
+
+		// re-anchor at runtime to top-right while flipped mid-animation
+		s.anchorPoint.set(1, 0);
+		// offsets: ox = (0.5-1)*32 = -16, oy = (0-0.5)*32 = -16
+		expect(new Set(xs(s.originalVertices))).toEqual(new Set([-32, 0]));
+		expect(new Set(ys(s.originalVertices))).toEqual(new Set([-32, 0]));
+		expect(s.isFlippedX()).toBe(true);
+
+		// unflip: geometry extents identical (mirror about art center), UVs revert
+		s.flipX(false);
+		expect(new Set(xs(s.originalVertices))).toEqual(new Set([-32, 0]));
+		expect(new Set(ys(s.originalVertices))).toEqual(new Set([-32, 0]));
+	});
+
+	it("anchor on a BOTH rotated and trimmed region (offsets on top of the mapping)", () => {
+		const img = makeTex(256, 256);
+		const s = new Sprite3d(0, 0, {
+			image: img,
+			width: 60,
+			height: 100,
+			anchorPoint: "bottom", // offsetY = +50
+		});
+		s._refLw = 0;
+		s._refLh = 0;
+		s.setRegion({
+			offset: { x: 5, y: 7 },
+			width: 40,
+			height: 80,
+			trimmed: true,
+			trim: { x: 10, y: 8, w: 40, h: 80 },
+			sourceSize: { w: 60, h: 100 },
+			angle: -Math.PI / 2,
+		});
+		const v = s.originalVertices;
+		// base mapping (see the un-anchored rotated+trimmed test) + (0, +50)
+		expect([v[0], v[1]]).toEqual([-20, 12]);
+		expect([v[3], v[4]]).toEqual([20, 12]);
+		expect([v[6], v[7]]).toEqual([20, 92]);
+		expect([v[9], v[10]]).toEqual([-20, 92]);
+	});
+
+	it("round-tripping anchors restores the centered geometry and bounds exactly", () => {
+		const s = mk("bottom");
+		s.anchorPoint.set(0.25, 0.75);
+		s.anchorPoint.set(2, -1); // out of range on purpose
+		s.anchorPoint.set(0.5, 0.5); // back to center
+		const fresh = mk(undefined);
+		expect(Array.from(s.originalVertices)).toEqual(
+			Array.from(fresh.originalVertices),
+		);
+		expect(s.width).toBe(fresh.width);
+		expect(s.height).toBe(fresh.height);
+		expect(s.getBounds().width).toBeCloseTo(fresh.getBounds().width, 5);
+	});
+
+	it("single-axis anchorPoint.y = 1 writes re-bake too", () => {
+		const s = mk(undefined);
+		s.anchorPoint.y = 1;
+		expect(s._anchorOffsetY).toBe(15);
+		expect(new Set(ys(s.originalVertices))).toEqual(new Set([0, 30]));
+	});
+
+	it("out-of-range anchors: the cull sphere still encloses every projected corner", () => {
+		const cam = new Camera3d(0, 0, 64, 64);
+		for (const anchor of ["bottom", "top-left", { x: 2, y: -1 }]) {
+			const s = mk(anchor, { billboard: "cylindrical" });
+			// Camera3d derives the cull radius from the bounds like this:
+			const radius = Math.hypot(s.width, s.height) / 2;
+			for (const [yaw, pitch] of [
+				[0, 0],
+				[0.8, -0.3],
+				[-1.2, 0.6],
+			]) {
+				cam.yaw = yaw;
+				cam.pitch = pitch;
+				s._billboardCam = cam;
+				s._projectVerticesWorld(s.pos.x, s.pos.y, s.depth);
+				const v = s.vertices;
+				for (let i = 0; i < 4; i++) {
+					const d = Math.hypot(
+						v[i * 3] - s.pos.x,
+						v[i * 3 + 1] - s.pos.y,
+						v[i * 3 + 2] - s.depth,
+					);
+					expect(d).toBeLessThanOrEqual(radius + 1e-3);
+				}
+			}
+		}
+	});
+
+	it("spherical billboard + anchor: corner distances from pos are rotation-invariant", () => {
+		const cam = new Camera3d(0, 0, 64, 64);
+		const s = mk("bottom", { billboard: "spherical" });
+		// local corner distances: (±10, 0) → 10, (±10, 30) → hypot(10, 30)
+		const expected = [10, 10, Math.hypot(10, 30), Math.hypot(10, 30)].sort(
+			(a, b) => {
+				return a - b;
+			},
+		);
+		for (const [yaw, pitch] of [
+			[0, 0],
+			[0.8, -0.3],
+			[-1.2, 0.6],
+		]) {
+			cam.yaw = yaw;
+			cam.pitch = pitch;
+			s._billboardCam = cam;
+			s._projectVerticesWorld(s.pos.x, s.pos.y, s.depth);
+			const v = s.vertices;
+			const dists = [0, 1, 2, 3]
+				.map((i) => {
+					return Math.hypot(
+						v[i * 3] - s.pos.x,
+						v[i * 3 + 1] - s.pos.y,
+						v[i * 3 + 2] - s.depth,
+					);
+				})
+				.sort((a, b) => {
+					return a - b;
+				});
+			for (let i = 0; i < 4; i++) {
+				expect(dists[i]).toBeCloseTo(expected[i], 4);
+			}
+		}
+	});
+
+	it("frame-derived size (no explicit width): offsets computed from the frame size", () => {
+		const sheet = document.createElement("canvas");
+		sheet.width = 64;
+		sheet.height = 32;
+		sheet.getContext("2d").fillRect(0, 0, 64, 32);
+		const s = new Sprite3d(0, 0, {
+			image: sheet,
+			framewidth: 32,
+			frameheight: 32,
+			anchorPoint: "bottom",
+		});
+		// w = h = 32 from the frame grid → offsetY = +16
+		expect(s._anchorOffsetY).toBe(16);
+		expect(new Set(ys(s.originalVertices))).toEqual(new Set([0, 32]));
+	});
+});
+
+describe("Sprite3d anchorPoint — remaining gap coverage", () => {
+	beforeAll(() => {
+		boot();
+		video.init(64, 64, { parent: "screen", renderer: video.CANVAS });
+	});
+
+	const makeTex = () => {
+		const c = document.createElement("canvas");
+		c.width = 4;
+		c.height = 4;
+		c.getContext("2d").fillRect(0, 0, 4, 4);
+		return c;
+	};
+
+	const localYs = (v) => {
+		return [v[1], v[4], v[7], v[10]];
+	};
+
+	it('flipY keeps a "bottom" anchor pinned (art mirrors inside the box)', () => {
+		const s = new Sprite3d(100, 50, {
+			image: makeTex(),
+			width: 20,
+			height: 30,
+			anchorPoint: "bottom",
+		});
+		const before = Array.from(s.originalVertices);
+		s.flipY();
+		// mirrored about the art's own center, then re-pinned: same extents
+		expect(new Set(localYs(s.originalVertices))).toEqual(new Set([0, 30]));
+		s.flipY(false);
+		expect(Array.from(s.originalVertices)).toEqual(before);
+	});
+
+	it("REGRESSION GUARD: the legacy centered bounds would NOT enclose a bottom-anchored quad", () => {
+		// the review scenario: a 130×225 bottom-anchored character. The old
+		// bounds side max(w, h) = 225 gives a cull radius of √(225²+225²)/2 ≈
+		// 159.1, while the head corners sit hypot(65, 225) ≈ 234.2 from pos —
+		// the sprite culled while a third of it was still on screen. This
+		// pins that the shipped bounds DO enclose it and the old ones don't.
+		const w = 130;
+		const h = 225;
+		const farthestCorner = Math.hypot(w / 2, h);
+		const legacyRadius = Math.hypot(Math.max(w, h), Math.max(w, h)) / 2;
+		expect(farthestCorner).toBeGreaterThan(legacyRadius); // the old bug
+
+		const s = new Sprite3d(0, 0, {
+			image: makeTex(),
+			width: w,
+			height: h,
+			anchorPoint: "bottom",
+		});
+		const shippedRadius = Math.hypot(s.width, s.height) / 2;
+		expect(shippedRadius).toBeGreaterThanOrEqual(farthestCorner - 1e-6);
 	});
 });
